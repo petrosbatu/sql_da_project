@@ -24,3 +24,41 @@
   - cust_id - идентификатор покупателя (ссылается на customer_dim)
   - product_quantity - число единиц товара в заказе
   - order_date - дата офрмления заказа
+
+## 1.Создание и импорт таблиц
+*Весь код также есть в отдельном файле, в котором блоки кода сопровождаются комментариями с нумерацией и заголовками, соответствующими заголовкам с номерами в описании проекта*
+Создаём базу данных и определяем таблицы, соответсвующие трём исходным файлам.
+```sql
+create table customers_dim
+(
+	cust_id integer primary key, 
+	cust_address varchar(100),
+	cust_age smallint,
+	effective_start_date date,
+	effective_end_date date,
+	current_ind varchar(1)
+);
+
+
+create table product_dim 
+(
+	product_id smallint, --не используется PK, так как значение не уникально
+	product_name varchar(50),
+	product_price real,
+	effective_start_date date,
+	effective_end_date date,
+	current_ind varchar(1)
+);
+
+create table sales_transactions
+(
+	order_id integer, --не используется PK, так как значение не уникально
+	product_id integer, --не используется FK, так как значение product_id в таблице product_dim не уникально
+	cust_id integer references customers_dim(cust_id),
+	product_quantity smallint,
+	order_date date
+);
+```
+В 3 пункте будет подробнее объяснено, каким образом хранятся данные и почему в таблицах были использованы не уникальные идентификаторы.
+
+Импорт данных в таблицы осуществляется операции импорта в pgAdmin4.
