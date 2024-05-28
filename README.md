@@ -134,3 +134,147 @@ where order_id = (
 Это значит, что разным строкам с одинаковыми order_id соответствуют разные товары в заказе.
 
 ## 4.Очистка и преобразование данных
+Удаляем несодержательные столбцы в таблице customers_dim.
+```sql
+alter table customers_dim drop column effective_start_date;
+alter table customers_dim drop column effective_end_date;
+alter table customers_dim drop column current_ind;
+```
+Также в этой таблице преобразуем адрес. Вместо алреса добавим столбцы с городом и штатом.
+```sql
+alter table customers_dim add column city varchar(20);
+alter table customers_dim add column cust_state varchar(20);
+```
+Заполним город, зная, что адрес хранится в формате "улица, город, почтовый индекс". Строка разбивается на массив по разделителю ',' с помощью string_to_array. Затем лишний пробел убирается с помощью функции trim.
+```sql
+update customers_dim
+set city = trim((string_to_array(cust_address, ','))[2]);
+```
+Также добавим штат (список городов получен с помощью запроса с distinct):
+```sql
+update customers_dim
+set cust_state = 
+    (case when city in ('Seattle') then 'Washington'
+        when city in ('San Francisco', 'Los Angeles') then 'California'
+        when city in ('Portland') then 'Oregon'
+        when city in ('Atlanta') then 'Georgia, U.S.'
+        when city in ('Boston') then 'Massachusetts'
+        when city in ('Dallas', 'Austin') then 'Massachusetts'
+        when city in ('New York City') then 'New York state'
+        else 'not defined'
+    end);
+```
+Теперь можно убрать столбец cust_adress, так как все необходимые для анализа сведения о местонахождении клиента находятся в новых столбцах.
+```sql
+alter table customers_dim drop column cust_address;
+```
+## 5.Анализ данных
+### 5.0.Создание представления
+В дальнейшем будут часто использованы запросы, в которых одновременно требуются данные из таблицы **sales_transactions** и **product_dim**. Для избежания повторений создадим представление с объединёнными таблицами. 
+```sql
+create view sales_with_prod_info as
+    (
+    select 
+        s.*,
+        p.product_name,
+        p.product_price,
+        p.effective_start_date,
+        p.effective_end_date
+    from sales_transactions s 
+        join product_dim p on s.product_id = p.product_id
+    where s.order_date between p.effective_start_date and p.effective_end_date 
+    )
+```
+### 5.1.Список товаров с ценами, которые актуальны "на данный момент"
+Получим этот список, отфильтруя по статусу current_ind.
+```sql
+select 
+    product_name, 
+    product_id, 
+    product_price
+from product_dim 
+where current_ind = 'Y'
+order by product_name
+```
+### 5.2.Число заказов и выручка по каждому товару 
+```sql
+select 
+     product_name, 
+     count(s.order_id) as count_orders, 
+     round((sum(s.product_quantity * p.product_price)/1e6)::numeric, 2)  as total_revenue_million
+from sales_with_prod_info
+group by product_name 
+order by total_revenue_million desc;
+```
+
+### 5.3.Число заказов и выручка по каждому месяцу
+```sql
+select 
+     extract(year from order_date) as y, 
+     extract(month from order_date) as "m",
+     count(s.order_id) as count_orders,
+     round((sum(s.product_quantity * p.product_price)/1e6)::numeric, 2)  as total_revenue_millions
+from sales_with_prod_info
+group by extract(year from order_date), extract(month from order_date)
+order by y, "m";
+```
+
+### 5.4.Анализ покупателей по возрасту (минимальный, максимальный, средний и медианный возраст)
+Данные сгруппированы по покупателю, затем получен результат с помощью агрегирующих функций. Закомментированная часть запроса гарантирует, что в таблице **customers_dim** нет записей о покупателях, которые не совершили ни одного заказа (при выполнении запроса с закомментированным кодом получаем значения null для всех функций).
+```sql
+select 
+    PERCENTILE_CONT(0.5) WITHIN GROUP(ORDER BY cust_age) as median_age,
+    round(avg(cust_age)) as mean_age,
+    min(cust_age) as min_age,
+    max(cust_age) as max_age
+from customers_dim c;
+/*where not exists (
+    select 1 
+    from sales_transactions s
+    where s.cust_id = c.cust_id);
+*/
+```
+
+### 5.5.Анализ выручки по двум возрастным группам 
+Поделим покупателей на две возрастные группы, в одной из них будут покупатели с возрастом меньше медианного, в другой - больше.
+```sql
+with cte_cust_age as
+    (
+    select
+        cust_id,
+        cust_age - (select PERCENTILE_CONT(0.5) WITHIN GROUP(ORDER BY cust_age) 
+		    from customers_dim) as age_diff
+    from customers_dim 
+    )
+select 
+    round(((sum(case when age_diff <= 0 then sp.product_quantity * sp.product_price 
+		     else 0 end))/1e6)::numeric, 2) as revenue_million_younger_group,
+    round(((sum(case when age_diff > 0 then sp.product_quantity * sp.product_price 
+		     else 0 end))/1e6)::numeric, 2) as revenue_million_elder_group
+from sales_with_prod_info sp
+    join cte_cust_age c on c.cust_id = sp.cust_id;
+```
+CTE использован в запросе для упрощения читаемости кода. В нём содержится **cust_id** (для последующего присоединения к представлению **sales_with_prod_info**) и **age_diff** (разница между возрастом покупателя и медианным возврастом). Прибыль (в млн.) рассчитывается с помощью агрегации sum и разбита на две группы при помощи case выражения, в котором сравнивается значение **age_diff** с нулём.
+
+### 5.6.Количество дней, которое в среднем проходит между заказами клиента
+```sql
+with cte_days_between_purchase as
+    (
+    select 
+        order_date - lag(order_date) over(partition by cust_id order by order_date) as days_from_last_purchase
+    from
+        (select distinct 
+            order_id,
+            cust_id,
+            order_date
+         from sales_transactions) as sales_dates
+    )
+select 
+    round(avg(days_from_last_purchase)) avg_days_between_purchase,
+    PERCENTILE_CONT(0.5) WITHIN GROUP(ORDER BY days_from_last_purchase) as median_days_between_purchase 
+from cte_days_between_purchase
+where days_from_last_purchase is not null
+```
+В **cte_days_between_purchase** запрос разбит на окна по cust_id, в которых строки отсортированы по order_date. Таким образом с помощью функции **lag()** можно получить предыдущую дату покупки у конкретного покупателя и вычислить разницу между ними. 
+При этом подзапрос оставляет только одну строку с информацией о каждом заказе с датой и id клиента. Если этого не сделать для заказазов с двумя и более разными товарами оконная функция вернёт дату предыдущего заказа только для первой строки конкретного заказа, а для последующих будет возвращена дата текущего заказа. Таким образом разница дат в этих строках будет равна 0, что не соответствует действительности.
+После вычисления разниц дат между заказами каждого клиента во внешнем запросе фильтруем строки где **days_from_last_purchase** не равны *null*, таким образом не учитываются первые заказы у каждого клиента (для которых не существует предыдущего заказа, соответственно не может быть рассчитанна разница с датой предыдущего заказа), и агрегируем с помощью соответсвующих агрегатных функций.
