@@ -131,7 +131,7 @@ where order_id = (
 |1  |141275  |715       |199595 |1               |2019-01-07|
 |2  |141275  |277       |199595 |1               |2019-01-07|
 
-Это значит, что разным строкам с одинаковыми order_id соответствуют разные товары в заказе.
+Это значит, что разным строкам с одинаковыми order_id соответствуют разные товары в одном заказе.
 
 ## 4.Очистка и преобразование данных
 Удаляем несодержательные столбцы в таблице customers_dim.
@@ -140,7 +140,7 @@ alter table customers_dim drop column effective_start_date;
 alter table customers_dim drop column effective_end_date;
 alter table customers_dim drop column current_ind;
 ```
-Также в этой таблице преобразуем адрес. Вместо алреса добавим столбцы с городом и штатом.
+Также в этой таблице преобразуем адрес. Вместо полного адреса добавим столбцы с городом и штатом.
 ```sql
 alter table customers_dim add column city varchar(20);
 alter table customers_dim add column cust_state varchar(20);
@@ -185,8 +185,8 @@ create view sales_with_prod_info as
     where s.order_date between p.effective_start_date and p.effective_end_date 
     )
 ```
-### 5.1.Список товаров с ценами, которые актуальны "на данный момент"
-Получим этот список, отфильтруя по статусу current_ind.
+### 5.1.Список товаров с ценами, которые актуальны на данный момент
+Получим этот список, отфильтруя по статусу **current_ind**.
 ```sql
 select 
     product_name, 
@@ -199,10 +199,10 @@ order by product_name
 ### 5.2.Число заказов и выручка по каждому товару 
 ```sql
 select 
-     product_name, 
-     count(s.order_id) as count_orders, 
-     round((sum(s.product_quantity * p.product_price)/1e6)::numeric, 2)  as total_revenue_million
-from sales_with_prod_info
+    product_name, 
+    count(sp.order_id) as count_orders, 
+    round((sum(sp.product_quantity * sp.product_price)/1e6)::numeric, 2)  as total_revenue_million
+from sales_with_prod_info sp
 group by product_name 
 order by total_revenue_million desc;
 ```
@@ -210,13 +210,13 @@ order by total_revenue_million desc;
 ### 5.3.Число заказов и выручка по каждому месяцу
 ```sql
 select 
-     extract(year from order_date) as y, 
-     extract(month from order_date) as "m",
-     count(s.order_id) as count_orders,
-     round((sum(s.product_quantity * p.product_price)/1e6)::numeric, 2)  as total_revenue_millions
-from sales_with_prod_info
+    extract(year from order_date) as y, 
+    extract(month from order_date) as m,
+    count(sp.order_id) as count_orders,
+    round((sum(sp.product_quantity * sp.product_price)/1e6)::numeric, 2)  as total_revenue_millions
+from sales_with_prod_info sp
 group by extract(year from order_date), extract(month from order_date)
-order by y, "m";
+order by y, m;
 ```
 
 ### 5.4.Анализ покупателей по возрасту (минимальный, максимальный, средний и медианный возраст)
@@ -276,5 +276,44 @@ from cte_days_between_purchase
 where days_from_last_purchase is not null
 ```
 В **cte_days_between_purchase** запрос разбит на окна по cust_id, в которых строки отсортированы по order_date. Таким образом с помощью функции **lag()** можно получить предыдущую дату покупки у конкретного покупателя и вычислить разницу между ними. 
+
 При этом подзапрос оставляет только одну строку с информацией о каждом заказе с датой и id клиента. Если этого не сделать для заказазов с двумя и более разными товарами оконная функция вернёт дату предыдущего заказа только для первой строки конкретного заказа, а для последующих будет возвращена дата текущего заказа. Таким образом разница дат в этих строках будет равна 0, что не соответствует действительности.
+
 После вычисления разниц дат между заказами каждого клиента во внешнем запросе фильтруем строки где **days_from_last_purchase** не равны *null*, таким образом не учитываются первые заказы у каждого клиента (для которых не существует предыдущего заказа, соответственно не может быть рассчитанна разница с датой предыдущего заказа), и агрегируем с помощью соответсвующих агрегатных функций.
+
+### 5.7.Топ 5 товаров по выручке для каждого штата
+```sql
+with sales_cte as
+    (
+    select 
+	c.cust_state, 
+	sp.product_name,
+	round(sum(sp.product_quantity * sp.product_price)/1e3) as revenue_per_state_and_product
+    from sales_with_prod_info sp 
+	join customers_dim c on sp.cust_id = c.cust_id
+    group by c.cust_state, sp.product_name
+    )
+select 
+    *
+from(
+    select 
+	cust_state, 
+	product_name,
+	revenue_per_state_and_product as revenue_thousand,
+	row_number() over(partition by cust_state order by revenue_per_state_and_product desc) as revenue_rank
+    from sales_cte) as sales_rank
+where revenue_rank <= 5
+```
+В **sales_cte** рассчитывается выручка (в тыс.) по каждому продукту в каждом штате. Затем в подзапросе (после from) каждому продукту присваивается ранг по прибыли в каждом штате с помощью оконной функции row_number с сортировкой по **revenue_per_state_and_product** в порядке убывания. Наконец, во внешнем запросе остаются только строки с рангом равным 5 или менее.
+
+### 5.8.Число клиентов, совершивших по крайней мере 5 заказов
+```sql
+select count(*)
+from(
+    select 1
+    from sales_transactions s
+	join customers_dim c on s.cust_id = c.cust_id
+    group by c.cust_id
+    having count(*) >= 5
+    ) as active_customers
+```
