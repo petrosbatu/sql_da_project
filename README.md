@@ -1,6 +1,9 @@
 # Проект по анализу данных с помощью SQL
 *В данном проекте используется PostgreSQL 16 и графический инструмент для управления базой данных pgAdmin4.*
-### Ссылка на pptx файл с итоговым отчётом: 
+### Ссылки на дашборды Datalens: 
+1. https://datalens.yandex/wfc1lh8nofcok
+2. https://datalens.yandex/exwkv5lpu4mg2
+3. https://datalens.yandex/8rq59a4krsoww
 ## Исходные данные
 
 1) customer_dim.csv (файл с данными о клиентах)
@@ -89,7 +92,7 @@ from customers_dim;
 |---|----------------------|--------------------|-------------|
 | 1 | 1900-01-01           | 9999-12-31         | Y           |
 
-То есть в этих трёх колонках не хранится какой либо полезной информации.
+Эти три колонки содержат уникальную тройку значений, причём крайние даты имеют слишком большую разницу с текущей. То есть, в этих трёх колонках не хранится содержательная информация.
 
 Перейдём к таблице product_dim. Как было указано ранее, значения product_id не уникальны. Обратимся к конкретному продукту с помощью запроса
 ```sql
@@ -186,7 +189,7 @@ create view sales_with_prod_info as
     )
 ```
 ### 5.1.Список товаров с ценами, которые актуальны на данный момент
-Получим этот список, отфильтруя по статусу **current_ind**.
+Получим этот список извлекая информацию из таблицы продуктов, фильтруя по статусу **current_ind**.
 ```sql
 select 
     product_name, 
@@ -208,6 +211,7 @@ order by total_revenue_million desc;
 ```
 
 ### 5.3.Число заказов и выручка по каждому месяцу
+Рассчитаем общую выручку по каждому месяцу с помощью следующего запроса:
 ```sql
 select 
     extract(year from order_date) as y, 
@@ -217,6 +221,23 @@ select
 from sales_with_prod_info sp
 group by extract(year from order_date), extract(month from order_date)
 order by y, m;
+```
+Используя предыдущий запрос в качестве подзапроса рассчитаем накопительную выручку и накопительное число заказов.
+```sql
+select 
+    y,
+    m,
+    sum(count_orders) over(order by y, m) as count_orders,
+    sum(total_revenue_millions) over(order by y, m) as total_revenue_millions
+from(
+    select 
+        extract(year from order_date) as y, 
+        extract(month from order_date) as m,
+        count(sp.order_id) as count_orders,
+        round((sum(sp.product_quantity * sp.product_price)/1e6)::numeric, 2)  as total_revenue_millions
+    from sales_with_prod_info sp
+    group by extract(year from order_date), extract(month from order_date)
+    )
 ```
 
 ### 5.4.Анализ покупателей по возрасту (минимальный, максимальный, средний и медианный возраст)
@@ -235,26 +256,28 @@ from customers_dim c;
 */
 ```
 
-### 5.5.Анализ выручки по двум возрастным группам 
-Поделим покупателей на две возрастные группы, в одной из них будут покупатели с возрастом меньше медианного, в другой - больше.
+### 5.5.Анализ выручки по восьми возрастным группам 
+Поделим покупателей на восемь одинаковых по величине групп с помощью **ntile(8)**. 
 ```sql
 with cte_cust_age as
     (
     select
-        cust_id,
-        cust_age - (select PERCENTILE_CONT(0.5) WITHIN GROUP(ORDER BY cust_age) 
-		    from customers_dim) as age_diff
+	cust_id,
+	cust_age,
+	ntile(8) over(order by cust_age) as age_group
     from customers_dim 
     )
-select 
-    round(((sum(case when age_diff <= 0 then sp.product_quantity * sp.product_price 
-		     else 0 end))/1e6)::numeric, 2) as revenue_million_younger_group,
-    round(((sum(case when age_diff > 0 then sp.product_quantity * sp.product_price 
-		     else 0 end))/1e6)::numeric, 2) as revenue_million_elder_group
+select
+    age_group,
+    min(cust_age),
+    max(cust_age),
+    round((sum(sp.product_price * sp.product_quantity)/1e6)::numeric, 2)
 from sales_with_prod_info sp
-    join cte_cust_age c on c.cust_id = sp.cust_id;
+    join cte_cust_age c on c.cust_id = sp.cust_id
+group by age_group
+order by age_group
 ```
-CTE использован в запросе для упрощения читаемости кода. В нём содержится **cust_id** (для последующего присоединения к представлению **sales_with_prod_info**) и **age_diff** (разница между возрастом покупателя и медианным возврастом). Прибыль (в млн.) рассчитывается с помощью агрегации sum и разбита на две группы при помощи case выражения, в котором сравнивается значение **age_diff** с нулём.
+В CTE содержится **cust_id** (для последующего присоединения к представлению **sales_with_prod_info**) и **cust_age** (для дальнейшего расчёта границ возрастных групп).
 
 ### 5.6.Количество дней, которое в среднем проходит между заказами клиента
 ```sql
@@ -317,3 +340,49 @@ from(
     having count(*) >= 5
     ) as active_customers
 ```
+
+### 5.9.Самые популярные пары товаров в заказе
+```sql
+select 
+    sp1.product_name as product1,
+    sp2.product_name as product2,
+    count(*) as cnt_orders
+from sales_with_prod_info sp1
+    join sales_with_prod_info sp2 on sp1.order_id = sp2.order_id
+where sp1.product_name < sp2.product_name
+group by sp1.product_name, sp2.product_name
+order by count(*) desc
+limit 10
+```
+
+### 5.10.Товары, которые чаще всего покупают вместе с другими товарами
+```sql
+with 
+    combinations as
+	(
+	select 
+	    sp1.product_name as product1,
+	    sp2.product_name as product2,
+	    count(*) as cnt_orders
+	from sales_with_prod_info sp1
+	    join sales_with_prod_info sp2 on sp1.order_id = sp2.order_id
+	where sp1.product_name < sp2.product_name
+	group by sp1.product_name, sp2.product_name
+	)
+    ,
+    product_list as
+	(
+	select distinct
+	    product_name
+	from product_dim
+	)
+select
+    p.product_name,
+    sum(c.cnt_orders) as orders
+from combinations c
+    join product_list p on (p.product_name = c.product1 or p.product_name = c.product2)
+group by p.product_name
+order by orders desc
+limit 10
+```
+В качестве CTE **combinations** использован предыдущий запрос. В CTE **product_list** содержатся все уникальные товары. Присоединяя эти таблицы друг к другу (если товар из списка уникальных продуктов совпадает с первым или со вторым в паре покупаемых товаров), группируя по каждому товару, и суммируя число заказов каждой пары товаров, получим, сколько раз каждый товар покупался в совокупности с каким-либо другим.
