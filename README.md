@@ -4,7 +4,10 @@
 1. https://datalens.yandex/wfc1lh8nofcok
 2. https://datalens.yandex/exwkv5lpu4mg2
 3. https://datalens.yandex/8rq59a4krsoww
+### Ссылка на .sql файл со всеми скриптами:
+https://github.com/petrosbatu/sql_da_project/blob/main/all%20scripts.sql
 ## Исходные данные
+### Ссылка на исходный датасет
 https://www.kaggle.com/datasets/teluskiman/fictional-sales-data/data
 1) customer_dim.csv (файл с данными о клиентах)
   - cust_id - уникальный идентификатор клиента
